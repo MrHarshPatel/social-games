@@ -1,17 +1,25 @@
 const express = require('express');
 const next = require('next');
 const mongoose = require('mongoose');
+const { Schema } = mongoose;
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
 const axios = require('axios');
+const cors = require('cors')
+const cookieParser = require('cookie-parser');
 
 // Connect to MongoDB
 mongoose.connect('mongodb://127.0.0.1:27017/lobbies', { useNewUrlParser: true, useUnifiedTopology: true });
 
 function generateUniqueUrl() {
-    // Code to generate a unique URL
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let id = '';
+    for (let i = 0; i < 5; i++) {
+        id += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    return id;
 }
 
 async function generateRandomUsername() {
@@ -24,13 +32,14 @@ async function generateRandomUsername() {
     }
 }
 
-const lobbySchema = new mongoose.Schema({
-    numUsers: { type: Number, default: 0 }
+const lobbySchema = new Schema({
+    url: { type: String, required: true, unique: true, default: generateUniqueUrl() },
+    users: [{ type: Schema.Types.ObjectId, ref: 'User' }],
 });
 
-const userSchema = new mongoose.Schema({
-    username: { type: String, default: generateRandomUsername() },
-    lobby: { type: mongoose.Schema.Types.ObjectId, ref: 'Lobby' }
+const userSchema = new Schema({
+    username: { type: String, required: true, unique: true },
+    lobby: { type: Schema.Types.ObjectId, ref: 'Lobby' },
 });
 
 const Lobby = mongoose.model('Lobby', lobbySchema);
@@ -38,6 +47,8 @@ const User = mongoose.model('User', userSchema);
 
 app.prepare().then(() => {
     const server = express();
+    server.use(cors({ origin: "http://localhost:3000", credentials: true }))
+    server.use(cookieParser());
 
     server.post('/api/lobbies', async (req, res) => {
         const newLobby = new Lobby({ url: generateUniqueUrl() });
@@ -45,23 +56,30 @@ app.prepare().then(() => {
         res.json({ lobby: newLobby });
     });
 
-    server.get('/test', async (req, res) => {
-        console.log("TEST!");
+    // TODO: Remove this route.
+    server.get('/ping', async (req, res) => {
+        console.log("Pong!");
     });
 
-    server.get('/lobby/:id', async (req, res) => {
+    server.get('/api/lobbies/:id', async (req, res) => {
         const lobbyId = req.params.id;
-        const lobby = await Lobby.findOne({ url: `/lobby/${lobbyId}` });
+        const lobby = await Lobby.findOne({ url: `${lobbyId}` }).populate('users');
         if (!lobby) {
             res.status(404).send("Lobby not found");
             return;
         }
-        const newUser = new User({ lobby: lobby._id });
-        await newUser.save();
-        lobby.numUsers++;
+
+        const cookie = req.cookies[lobbyId];
+        if (!cookie) {
+            res.cookie(lobbyId, true, { maxAge: 60 * 60 * 24 * 7, isHttpOnly: false });
+            // create a new user and add them to the lobby
+            const newUser = new User({ lobby: lobby._id, username: await generateRandomUsername() });
+            await newUser.save();
+            lobby.users.push(newUser);
+            res.cookie(`${lobbyId}/user`, newUser.username, { maxAge: 60 * 60 * 24 * 7, isHttpOnly: false });
+        }
         await lobby.save();
-        console.log(`User ${newUser.username} joined lobby ${lobbyId} which now has ${lobby.users} users`);
-        res.json({ message: "You have joined the lobby", username: newUser.username });
+        res.json({ lobby: lobby });
     });
 
     server.get('/api/lobbies/:id/users', async (req, res) => {
